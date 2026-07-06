@@ -353,11 +353,103 @@ def generate_styled_html_preview(records):
     return html_template
 
 
+def update_outputs_from_records(records):
+    """Regenerates files in session state dynamically when records are altered by Find/Replace operations."""
+    # Write outputs to high-fidelity styled Excel structure
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Ad Scripts Data"
+    
+    # Show grid lines
+    sheet.views.sheetView[0].showGridLines = True
+    
+    headers = [
+        "Creative Name", "Click URL", "Content (Adform Tag)", "Creative Size", 
+        "Campaign Manager Placement/Draft Name", "Clean Original Script", 
+        "DV360 Modified Script Tag", "Destination Landing Page URL"
+    ]
+    sheet.append(headers)
+    
+    # Styled premium elements for columns and headings
+    header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    border_thin = Side(border_style="thin", color="D9D9D9")
+    cell_border = Border(left=border_thin, right=border_thin, top=border_thin, bottom=border_thin)
+    
+    for col_num, header_title in enumerate(headers, 1):
+        cell = sheet.cell(row=1, column=col_num)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = cell_border
+    
+    for r in records:
+        sheet.append([
+            r["name"],
+            "",  # Click URL placeholder
+            r["processed_adform"],
+            r["size"],
+            r["name_draft"],
+            r["clean_original"],
+            r["processed_dv360"],
+            r["landing_page"]
+        ])
+    
+    # Format spreadsheet layouts and adjust column widths
+    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row, min_col=1, max_col=8):
+        for cell in row:
+            cell.font = Font(name="Calibri", size=11)
+            cell.border = cell_border
+            # Align large textual script code boxes gracefully
+            if cell.column in [3, 6, 7]:
+                cell.alignment = Alignment(vertical="top", wrap_text=False)
+            else:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+                
+    # Determine best-fit column sizing
+    for col in sheet.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        # Cap script block widths to prevent horizontal overstretching
+        if col[0].column in [3, 6, 7]:
+            sheet.column_dimensions[col_letter].width = 35
+        else:
+            for cell in col:
+                if cell.value:
+                    max_len = max(max_len, len(str(cell.value)))
+            sheet.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 40)
+
+    # Excel save to binary buffer
+    excel_buffer = io.BytesIO()
+    workbook.save(excel_buffer)
+    excel_buffer.seek(0)
+    
+    # Generate styled raw preview outputs
+    html_output = generate_styled_html_preview(records)
+    html_buffer = io.BytesIO(html_output.encode('utf-8'))
+    
+    # Update Session states
+    st.session_state.excel_bytes = excel_buffer.getvalue()
+    st.session_state.html_bytes = html_buffer.getvalue()
+    
+    # Refresh live previews
+    st.session_state.df_preview = [
+        {
+            "Name": r["name"],
+            "Size": r["size"],
+            "Landing Page": r["landing_page"],
+            "Adform Script Preview": r["processed_adform"][:120] + "..." if len(r["processed_adform"]) > 120 else r["processed_adform"],
+            "DV360 Script Preview": r["processed_dv360"][:120] + "..." if len(r["processed_dv360"]) > 120 else r["processed_dv360"]
+        }
+        for r in records
+    ]
+
+
 def main():
     st.title("📝 Ad Script Converter Pro")
     st.write("Convert agency-specific raw `.txt` script tags (either uploaded directly or nested in `.zip` folders) into clean, macro-enabled configurations ready for upload.")
 
-    # Highly optimized default configurations (Replacing previous sidebar settings)
+    # Highly optimized default configurations
     resolve_redirects = True
     timeout_limit = 5
     concurrent_threads = 8
@@ -372,6 +464,8 @@ def main():
         st.session_state.html_bytes = None
     if 'df_preview' not in st.session_state:
         st.session_state.df_preview = None
+    if 'records' not in st.session_state:
+        st.session_state.records = None
 
     uploaded_files = st.file_uploader(
         "Upload Raw Ad Script Files (.txt or .zip archives)", 
@@ -480,102 +574,59 @@ def main():
                     if url_to_lookup in resolved_url_map:
                         r["landing_page"] = resolved_url_map[url_to_lookup]
             
-            # Step 3: Write outputs to high-fidelity styled Excel structure
+            # Step 3: Populate primary structures & trigger update loops
             status_text.text("📊 Formatting premium spreadsheet outputs...")
-            workbook = Workbook()
-            sheet = workbook.active
-            sheet.title = "Ad Scripts Data"
-            
-            # Show grid lines
-            sheet.views.sheetView[0].showGridLines = True
-            
-            headers = [
-                "Creative Name", "Click URL", "Content (Adform Tag)", "Creative Size", 
-                "Campaign Manager Placement/Draft Name", "Clean Original Script", 
-                "DV360 Modified Script Tag", "Destination Landing Page URL"
-            ]
-            sheet.append(headers)
-            
-            # Styled premium elements for columns and headings
-            header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
-            header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-            border_thin = Side(border_style="thin", color="D9D9D9")
-            cell_border = Border(left=border_thin, right=border_thin, top=border_thin, bottom=border_thin)
-            
-            for col_num, header_title in enumerate(headers, 1):
-                cell = sheet.cell(row=1, column=col_num)
-                cell.fill = header_fill
-                cell.font = header_font
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                cell.border = cell_border
-            
-            for r in records:
-                sheet.append([
-                    r["name"],
-                    "",  # Click URL placeholder
-                    r["processed_adform"],
-                    r["size"],
-                    r["name_draft"],
-                    r["clean_original"],
-                    r["processed_dv360"],
-                    r["landing_page"]
-                ])
-            
-            # Format spreadsheet layouts and adjust column widths
-            for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row, min_col=1, max_col=8):
-                for cell in row:
-                    cell.font = Font(name="Calibri", size=11)
-                    cell.border = cell_border
-                    # Align large textual script code boxes gracefully
-                    if cell.column in [3, 6, 7]:
-                        cell.alignment = Alignment(vertical="top", wrap_text=False)
-                    else:
-                        cell.alignment = Alignment(vertical="top", wrap_text=True)
-                        
-            # Determine best-fit column sizing
-            for col in sheet.columns:
-                max_len = 0
-                col_letter = get_column_letter(col[0].column)
-                # Cap script block widths to prevent horizontal overstretching
-                if col[0].column in [3, 6, 7]:
-                    sheet.column_dimensions[col_letter].width = 35
-                else:
-                    for cell in col:
-                        if cell.value:
-                            max_len = max(max_len, len(str(cell.value)))
-                    sheet.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 40)
-
-            # Excel save to binary buffer
-            excel_buffer = io.BytesIO()
-            workbook.save(excel_buffer)
-            excel_buffer.seek(0)
-            
-            # Generate styled raw preview outputs
-            html_output = generate_styled_html_preview(records)
-            html_buffer = io.BytesIO(html_output.encode('utf-8'))
-            
-            # Write results back to local runtime session
-            st.session_state.excel_bytes = excel_buffer.getvalue()
-            st.session_state.html_bytes = html_buffer.getvalue()
-            
-            # Create a simple list comprehension for displaying previews instantly
-            st.session_state.df_preview = [
-                {
-                    "Name": r["name"],
-                    "Size": r["size"],
-                    "Landing Page": r["landing_page"],
-                    "Adform Script Preview": r["processed_adform"][:120] + "..." if len(r["processed_adform"]) > 120 else r["processed_adform"],
-                    "DV360 Script Preview": r["processed_dv360"][:120] + "..." if len(r["processed_dv360"]) > 120 else r["processed_dv360"]
-                }
-                for r in records
-            ]
+            st.session_state.records = records
+            update_outputs_from_records(records)
             
             progress_bar.progress(100)
             status_text.empty()
             st.success(f"Successfully processed {len(records)} script configs!")
 
-    # Step 4: Display on-screen preview & download triggers
-    if st.session_state.df_preview is not None:
+    # Step 4: Display Find and Replace, on-screen previews & export downloads
+    if st.session_state.records is not None:
+        
+        # New Bulk Find and Replace Utility Block
+        st.markdown("### 🛠️ Find & Replace Naming Utility")
+        st.info("💡 Adjust and align naming patterns dynamically (similar to Ctrl+H in Excel) before generating final outputs.")
+        
+        col_find, col_replace, col_opt = st.columns([3, 3, 4])
+        with col_find:
+            find_val = st.text_input("Find string", placeholder="e.g., OldBrandName")
+        with col_replace:
+            replace_val = st.text_input("Replace with", placeholder="e.g., NewBrandName")
+        with col_opt:
+            st.write("Target Fields:")
+            sub_col1, sub_col2 = st.columns(2)
+            with sub_col1:
+                replace_in_name = st.checkbox("Apply to Creative Name", value=True)
+            with sub_col2:
+                replace_in_draft = st.checkbox("Apply to Placement/Draft Name", value=False)
+                
+        if st.button("Apply Replacements", type="secondary"):
+            if find_val:
+                match_count = 0
+                for r in st.session_state.records:
+                    target_updated = False
+                    if replace_in_name and find_val in r["name"]:
+                        r["name"] = r["name"].replace(find_val, replace_val)
+                        target_updated = True
+                    if replace_in_draft and find_val in r["name_draft"]:
+                        r["name_draft"] = r["name_draft"].replace(find_val, replace_val)
+                        target_updated = True
+                    if target_updated:
+                        match_count += 1
+                        
+                if match_count > 0:
+                    update_outputs_from_records(st.session_state.records)
+                    st.success(f"Successfully replaced '{find_val}' with '{replace_val}' in {match_count} item(s)!")
+                    st.rerun()
+                else:
+                    st.warning(f"No matches found for '{find_val}' within the targeted fields.")
+            else:
+                st.error("Please enter a string to find.")
+
+        st.markdown("---")
         st.markdown("### 📊 Live Conversion Preview")
         st.dataframe(st.session_state.df_preview, use_container_width=True)
 
