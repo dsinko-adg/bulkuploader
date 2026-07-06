@@ -5,7 +5,9 @@ from openpyxl.utils import get_column_letter
 import requests
 import re
 import io
+import os
 import logging
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Set up logging
@@ -15,8 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 st.set_page_config(
     page_title="Ad Script Converter Pro", 
     page_icon="📝", 
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
 # Custom Styles
@@ -102,6 +103,62 @@ def resolve_landing_page(url, timeout=5):
     except Exception as e:
         logging.error(f"Network redirection error for {url}: {e}")
         return url
+
+
+def parse_and_process_file_content(raw_bytes, filename, parent_folder_name, macro_gdpr, macro_consent, macro_redir):
+    """Decodes, parses, and creates the structured metadata mapping for each script."""
+    # Robust character encoding detection fallback
+    try:
+        content = raw_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            content = raw_bytes.decode('latin1')
+        except UnicodeDecodeError:
+            content = raw_bytes.decode('cp1252', errors='replace')
+    
+    comment = extract_comment(content)
+    name_draft = comment.split(',')[0] if ',' in comment else comment
+    
+    # If no draft name in comment, fallback to filename (without extension)
+    if not name_draft:
+        name_draft = os.path.splitext(filename)[0]
+        
+    # Replicate your desktop renamer logic: Prepend the immediate parent folder name
+    if parent_folder_name:
+        name_draft = f"{parent_folder_name}_{name_draft}"
+        
+    size = extract_size(name_draft)
+    
+    # Strip out processing comments to find original clean code
+    clean_original = content
+    if comment:
+        clean_original = content.replace(f"<!--{comment}-->", "").strip()
+    
+    # Run processed transforms
+    processed_adform = process_adform_content(clean_original)
+    name = extract_name(name_draft)
+    
+    # Modify DV360 tracking variables based on config
+    processed_dv360 = (
+        clean_original
+        .replace('gdpr=0', macro_gdpr)
+        .replace('gdpr_consent=', macro_consent)
+        .replace('redir="', macro_redir)
+    )
+    
+    # Extract script-level redirection paths
+    extracted_url = extract_single_script_url(clean_original)
+    
+    return {
+        "name": name,
+        "size": size,
+        "name_draft": name_draft,
+        "clean_original": clean_original,
+        "processed_adform": processed_adform,
+        "processed_dv360": processed_dv360,
+        "extracted_url": extracted_url,
+        "landing_page": ""  # Resolved next
+    }
 
 
 def generate_styled_html_preview(records):
@@ -298,27 +355,15 @@ def generate_styled_html_preview(records):
 
 def main():
     st.title("📝 Ad Script Converter Pro")
-    st.write("Convert agency-specific raw `.txt` script tags into clean, macro-enabled configurations ready for upload.")
+    st.write("Convert agency-specific raw `.txt` script tags (either uploaded directly or nested in `.zip` folders) into clean, macro-enabled configurations ready for upload.")
 
-    # Sidebar controls for customized automation setups
-    st.sidebar.header("⚙️ Configuration Settings")
-    
-    # Toggle for network calls
-    resolve_redirects = st.sidebar.toggle("Resolve Destination Landing Pages", value=True, 
-                                          help="When active, the app will ping script tracking URLs to capture the true destination URL.")
-    
-    timeout_limit = st.sidebar.slider("Network Timeout (Seconds)", min_value=1, max_value=15, value=5,
-                                      help="Maximum time to wait on each redirect response.")
-    
-    concurrent_threads = st.sidebar.slider("Parallel Threads for Resolving", min_value=2, max_value=20, value=8,
-                                           help="Higher thread counts accelerate resolving when parsing many files.")
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🎯 Macro Customizations")
-    
-    macro_gdpr = st.sidebar.text_input("GDPR Macro Match Replacement", value="gdpr=${GDPR}")
-    macro_consent = st.sidebar.text_input("GDPR Consent Match Replacement", value="gdpr_consent=${GDPR_CONSENT_328}")
-    macro_redir = st.sidebar.text_input("Redir URL Replacement", value="redir=${CLICK_URL}\"")
+    # Highly optimized default configurations (Replacing previous sidebar settings)
+    resolve_redirects = True
+    timeout_limit = 5
+    concurrent_threads = 8
+    macro_gdpr = "gdpr=${GDPR}"
+    macro_consent = "gdpr_consent=${GDPR_CONSENT_328}"
+    macro_redir = "redir=${CLICK_URL}\""
 
     # State setups
     if 'excel_bytes' not in st.session_state:
@@ -329,13 +374,13 @@ def main():
         st.session_state.df_preview = None
 
     uploaded_files = st.file_uploader(
-        "Upload Raw Ad Script Files (.txt only)", 
-        type=['txt'], 
+        "Upload Raw Ad Script Files (.txt or .zip archives)", 
+        type=['txt', 'zip'], 
         accept_multiple_files=True
     )
 
     if uploaded_files:
-        st.info(f"📂 {len(uploaded_files)} files selected.")
+        st.info(f"📂 {len(uploaded_files)} item(s) selected.")
         
         if st.button("Process Scripts", type="primary"):
             progress_bar = st.progress(0)
@@ -343,54 +388,59 @@ def main():
             
             records = []
             
-            # Step 1: Parse files
+            # Step 1: Parse and unpack files (including deep directory structures inside ZIP files)
             for idx, uploaded_file in enumerate(uploaded_files):
-                raw_bytes = uploaded_file.read()
+                file_name_lower = uploaded_file.name.lower()
                 
-                # Robust character encoding detection fallback
-                try:
-                    content = raw_bytes.decode('utf-8')
-                except UnicodeDecodeError:
+                if file_name_lower.endswith('.zip'):
+                    status_text.text(f"📦 Extracting directory structure from: {uploaded_file.name}...")
                     try:
-                        content = raw_bytes.decode('latin1')
-                    except UnicodeDecodeError:
-                        content = raw_bytes.decode('cp1252', errors='replace')
+                        zip_data = uploaded_file.read()
+                        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+                            for member in z.infolist():
+                                # Skip directory entries and non-txt files
+                                if member.filename.endswith('/') or member.is_dir():
+                                    continue
+                                if not member.filename.lower().endswith('.txt'):
+                                    continue
+                                
+                                # Retrieve folder hierarchy details
+                                parent_folder_name = os.path.basename(os.path.dirname(member.filename))
+                                filename_only = os.path.basename(member.filename)
+                                
+                                with z.open(member) as f:
+                                    raw_bytes = f.read()
+                                    
+                                record = parse_and_process_file_content(
+                                    raw_bytes,
+                                    filename_only,
+                                    parent_folder_name,
+                                    macro_gdpr,
+                                    macro_consent,
+                                    macro_redir
+                                )
+                                records.append(record)
+                    except Exception as e:
+                        st.error(f"Error unpacking ZIP archive '{uploaded_file.name}': {str(e)}")
                 
-                comment = extract_comment(content)
-                name_draft = comment.split(',')[0] if ',' in comment else comment
-                size = extract_size(name_draft)
-                
-                # Strip out processing comments to find original clean code
-                clean_original = content
-                if comment:
-                    clean_original = content.replace(f"<!--{comment}-->", "").strip()
-                
-                # Run processed transforms
-                processed_adform = process_adform_content(clean_original)
-                name = extract_name(name_draft)
-                
-                # Modify DV360 tracking variables based on config
-                processed_dv360 = (
-                    clean_original
-                    .replace('gdpr=0', macro_gdpr)
-                    .replace('gdpr_consent=', macro_consent)
-                    .replace('redir="', macro_redir)
-                )
-                
-                # Extract script-level redirection paths
-                extracted_url = extract_single_script_url(clean_original)
-                
-                records.append({
-                    "name": name,
-                    "size": size,
-                    "name_draft": name_draft,
-                    "clean_original": clean_original,
-                    "processed_adform": processed_adform,
-                    "processed_dv360": processed_dv360,
-                    "extracted_url": extracted_url,
-                    "landing_page": ""  # Resolved next
-                })
-                
+                elif file_name_lower.endswith('.txt'):
+                    status_text.text(f"📄 Reading single script file: {uploaded_file.name}...")
+                    raw_bytes = uploaded_file.read()
+                    
+                    record = parse_and_process_file_content(
+                        raw_bytes,
+                        uploaded_file.name,
+                        "",  # No parent folder from simple direct file upload
+                        macro_gdpr,
+                        macro_consent,
+                        macro_redir
+                    )
+                    records.append(record)
+
+            if not records:
+                st.warning("⚠️ No valid `.txt` script tags were discovered in the uploaded content.")
+                return
+
             # Step 2: Resolve redirect links concurrently to avoid sequential blocking delays
             if resolve_redirects:
                 status_text.text("🔗 Running parallel checks on redirection loops...")
